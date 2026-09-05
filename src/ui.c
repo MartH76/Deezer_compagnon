@@ -7,6 +7,14 @@
 LV_FONT_DECLARE(lv_font_dz_title_22);
 LV_FONT_DECLARE(lv_font_dz_artist_16);
 
+static void ui_show_placeholder(void);
+
+/* Egaliseur anime affiche quand la piste n'a pas de pochette */
+#define PH_BARS 4
+static lv_obj_t *ph_cont;
+static lv_obj_t *ph_bar[PH_BARS];
+static void ph_set_h(void *var, int32_t v) { lv_obj_set_height((lv_obj_t *)var, v); }
+
 #define ACCENT  0x8B5CF6   /* violet accent */
 
 static lv_obj_t *canvas;
@@ -34,6 +42,37 @@ void ui_init(void) {
     lv_canvas_set_buffer(canvas, cover_buf, LCD_W, LCD_H, LV_COLOR_FORMAT_RGB565);
     lv_obj_center(canvas);
     lv_canvas_fill_bg(canvas, lv_color_black(), LV_OPA_COVER);
+
+    /* Egaliseur anime (place au-dessus du fond, cache par defaut) */
+    ph_cont = lv_obj_create(scr);
+    lv_obj_remove_style_all(ph_cont);
+    lv_obj_set_size(ph_cont, 84, 42);
+    lv_obj_align(ph_cont, LV_ALIGN_CENTER, 0, -18);
+    lv_obj_set_flex_flow(ph_cont, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ph_cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(ph_cont, 7, 0);
+    lv_obj_remove_flag(ph_cont, LV_OBJ_FLAG_SCROLLABLE);
+    for (int i = 0; i < PH_BARS; i++) {
+        lv_obj_t *b = lv_obj_create(ph_cont);
+        lv_obj_remove_style_all(b);
+        lv_obj_set_width(b, 10);
+        lv_obj_set_height(b, 10);
+        lv_obj_set_style_bg_color(b, lv_color_hex(ACCENT), 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(b, 3, 0);
+        ph_bar[i] = b;
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, b);
+        lv_anim_set_exec_cb(&a, ph_set_h);
+        lv_anim_set_values(&a, 8, 38);
+        lv_anim_set_duration(&a, 360 + i * 80);
+        lv_anim_set_playback_duration(&a, 360 + i * 80);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_delay(&a, i * 110);
+        lv_anim_start(&a);
+    }
+    lv_obj_add_flag(ph_cont, LV_OBJ_FLAG_HIDDEN);
 
     /* Anneau de volume au bord, gap en bas */
     arc_vol = lv_arc_create(scr);
@@ -113,14 +152,22 @@ void ui_set_connected(bool c) {
 
 void ui_set_track(const char *title, const char *artist) {
     static char lt[128] = "", la[96] = "";
+    /* Ignorer les etats transitoires a titre vide (evite un faux changement de piste). */
+    if (title == NULL || title[0] == '\0') return;
+
+    bool changed = false;
     if (strncmp(lt, title, sizeof(lt)) != 0) {
         lv_label_set_text(lbl_title, title);
         strncpy(lt, title, sizeof(lt) - 1); lt[sizeof(lt) - 1] = 0;
+        changed = true;
     }
-    if (strncmp(la, artist, sizeof(la)) != 0) {
-        lv_label_set_text(lbl_artist, artist);
-        strncpy(la, artist, sizeof(la) - 1); la[sizeof(la) - 1] = 0;
+    if (strncmp(la, (artist ? artist : ""), sizeof(la)) != 0) {
+        lv_label_set_text(lbl_artist, artist ? artist : "");
+        strncpy(la, artist ? artist : "", sizeof(la) - 1); la[sizeof(la) - 1] = 0;
     }
+    /* Vrai changement de piste : retirer l'ancienne pochette (placeholder anime).
+       Si une pochette arrive (immediate si en cache), elle remplacera le placeholder. */
+    if (changed) ui_show_placeholder();
 }
 
 void ui_set_state(const char *st) {
@@ -163,7 +210,16 @@ void ui_set_cover(const uint8_t *jpeg, size_t len) {
     lv_draw_image(&layer, &idsc, &area);
     lv_canvas_finish_layer(canvas, &layer);
 
+    if (ph_cont) lv_obj_add_flag(ph_cont, LV_OBJ_FLAG_HIDDEN);
     lv_obj_invalidate(canvas);
+}
+
+
+/* Fond de repli quand la piste n'a pas de pochette : sombre + note de musique. */
+static void ui_show_placeholder(void) {
+    lv_canvas_fill_bg(canvas, lv_color_hex(0x15131C), LV_OPA_COVER);
+    lv_obj_invalidate(canvas);
+    if (ph_cont) lv_obj_remove_flag(ph_cont, LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_bringup_demo(void) {
