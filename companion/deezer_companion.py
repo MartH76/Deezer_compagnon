@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Deezer Desk Gadget - compagnon Windows (verbeux)
-------------------------------------------------
+Deezer Desk Gadget - compagnon Windows
+--------------------------------------
 Pont entre Deezer (media session SMTC) et le Pico (USB CDC).
 
-- Tourne MEME sans le Pico : mode apercu console (utile pour valider Deezer).
-- Reconnexion serie automatique quand le Pico apparait/disparait.
+- Lit titre / artiste / etat / position via SMTC, et le volume via pycaw.
+- Recupere la pochette via un WORKER SMTC persistant (session WinRT gardee
+  ouverte) + un cache par titre : changement de piste quasi instantane.
+- Tourne meme sans le Pico (mode apercu console), reconnexion serie auto.
 
 IMPORTANT : lancer avec le Python OFFICIEL Windows (python.org / Store),
-PAS celui de MSYS2 (winsdk et pycaw ne marchent pas sous mingw).
+PAS celui de MSYS2 (winsdk et pycaw n'y fonctionnent pas).
 
 Dependances :  py -m pip install -r requirements.txt
 Lancement   :  py "...\companion\deezer_companion.py"   (ou COM force en argument)
 """
 
 import asyncio
-import hashlib
 import io
 import json
 import queue
@@ -34,8 +35,6 @@ from winsdk.windows.media.control import (
 from winsdk.windows.storage.streams import DataReader
 
 from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
-import functools
-print = functools.partial(print, flush=True)  # flush systematique (Git Bash)
 
 # Sortie non bufferisee (sinon les prints restent coinces sous Git Bash)
 try:
@@ -50,8 +49,7 @@ ART_SIZE = 240
 POLL_S = 0.2
 VOL_EVERY = 4
 RECONNECT_S = 3.0
-DEBUG = False   # True = traces detaillees
-ENABLE_VOLUME = True    # volume Deezer lu dans un thread dedie (evite le deadlock COM)
+ENABLE_VOLUME = True
 
 cmd_q = queue.Queue()
 ser = None
@@ -156,6 +154,14 @@ def set_deezer_volume(pct):
     return False
 
 
+def get_volume_sync():
+    """Lecture du volume dans un thread dedie (evite le deadlock COM)."""
+    try:
+        return get_deezer_volume()
+    except Exception:
+        return None
+
+
 # ----------------------------------------------------------------- SMTC
 def pick_session(mgr):
     for s in mgr.get_sessions():
@@ -169,66 +175,81 @@ def pick_session(mgr):
 
 async def read_thumbnail(props):
     ref = props.thumbnail
-    DEBUG and print(f"[pochette-dbg] thumbnail ref = {'oui' if ref else 'NON'}")
     if ref is None:
         return None
     stream = await ref.open_read_async()
     size = stream.size
-    DEBUG and print(f"[pochette-dbg] taille flux = {size}")
     if not size:
         return None
     reader = DataReader(stream)
     await reader.load_async(size)
     buf = bytearray(size)
-    reader.read_bytes(buf)
+    reader.read_bytes(buf)             # winsdk : read_bytes remplit le buffer
     raw = bytes(buf)
-    DEBUG and print(f"[pochette-dbg] octets bruts = {len(raw)} (magic {raw[:3].hex() if raw else '--'})")
     img = Image.open(io.BytesIO(raw)).convert("RGB")
-    img = img.resize((ART_SIZE, ART_SIZE), Image.LANCZOS)
+    img = img.resize((ART_SIZE, ART_SIZE), getattr(Image, "Resampling", Image).LANCZOS)
     out = io.BytesIO()
     img.save(out, "JPEG", quality=80)
-    data = out.getvalue()
-    DEBUG and print(f"[pochette-dbg] jpeg final = {len(data)} octets")
-    return data
+    return out.getvalue()
 
 
-def fetch_cover_sync():
-    """Lit la pochette dans un THREAD dedie (event loop et apartment COM neufs)
-    pour eviter le deadlock winsdk observe sur le thread principal."""
-    async def _inner():
-        mgr = await MediaManager.request_async()
-        s = pick_session(mgr)
-        if s is None:
-            return None
-        props = await s.try_get_media_properties_async()
-        return await read_thumbnail(props)
-    try:
-        return asyncio.run(_inner())
-    except Exception as e:
-        DEBUG and print(f"[pochette-dbg] exception: {e!r}")
+# ----------------------------------------------------------------- worker pochettes
+_cover_loop = None
+_cover_mgr = None
+cover_cache = {}
+_cache_order = []
+
+
+def _cover_thread_main():
+    global _cover_loop, _cover_mgr
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    _cover_mgr = loop.run_until_complete(MediaManager.request_async())
+    _cover_loop = loop
+    loop.run_forever()
+
+
+def start_cover_worker():
+    """Demarre le thread dedie aux pochettes (session WinRT persistante)."""
+    threading.Thread(target=_cover_thread_main, daemon=True).start()
+    for _ in range(60):
+        if _cover_loop is not None and _cover_mgr is not None:
+            print("[pochette] worker SMTC pret")
+            return True
+        time.sleep(0.05)
+    print("[pochette] worker SMTC non pret (on continue quand meme)")
+    return False
+
+
+async def _worker_read_cover():
+    s = pick_session(_cover_mgr)
+    if s is None:
         return None
+    props = await s.try_get_media_properties_async()
+    return await read_thumbnail(props)
 
 
-def get_volume_sync():
-    """Idem pour pycaw (COM) : dans un thread dedie."""
+async def fetch_and_send_cover(track_id):
+    """Recupere la pochette via le worker persistant, met en cache et envoie."""
+    if _cover_loop is None:
+        return
     try:
-        return get_deezer_volume()
-    except Exception:
-        return None
-
-
-async def fetch_and_send_cover(loop):
-    """Recupere la pochette (thread dedie) et l'envoie, SANS bloquer le flux d'etat."""
-    try:
-        art = await asyncio.wait_for(loop.run_in_executor(None, fetch_cover_sync), timeout=8.0)
+        fut = asyncio.run_coroutine_threadsafe(_worker_read_cover(), _cover_loop)
+        art = await asyncio.wait_for(asyncio.wrap_future(fut), timeout=8.0)
     except Exception as e:
         print(f"[pochette] echec/timeout: {e}")
         return
-    if art:
-        if serial_write(f"ART:{len(art)}\n".encode()) and serial_write(art):
-            print(f"[pochette] envoyee {len(art)} octets")
+    if not art:
+        return
+    cover_cache[track_id] = art
+    _cache_order.append(track_id)
+    if len(_cache_order) > 40:
+        cover_cache.pop(_cache_order.pop(0), None)
+    if serial_write(f"ART:{len(art)}\n".encode()) and serial_write(art):
+        print(f"[pochette] envoyee {len(art)} octets")
 
 
+# ----------------------------------------------------------------- commandes
 async def exec_cmd(mgr, txt):
     s = pick_session(mgr)
     if s is None and not txt.startswith("CMD:VOL="):
@@ -257,18 +278,17 @@ async def main():
     print("Ports serie detectes :")
     print(list_ports_str())
     if not try_open_serial():
-        print("[serie] Pico non trouve -> mode APERCU CONSOLE (je lis Deezer quand meme).")
-        print("        Branche le Pico flashe et je m'y connecterai tout seul.")
+        print("[serie] Pico non trouve -> mode APERCU CONSOLE (Deezer lu quand meme).")
+        print("        Branche le Pico flashe : connexion automatique.")
 
     mgr = await MediaManager.request_async()
     print("[deezer] init OK, lecture de l'etat en cours...")
     loop = asyncio.get_running_loop()
+    start_cover_worker()
 
     last_send = None
     last_print = None
     last_track = None
-    cover_task = None
-    last_art_hash = None
     vol_cache = 0
     tick = 0
     last_reco = 0.0
@@ -277,8 +297,6 @@ async def main():
     while True:
         tick += 1
         now = time.time()
-        if DEBUG:
-            print(f"[trace] LOOP start tick={tick}")
 
         # reconnexion serie
         with ser_lock:
@@ -291,12 +309,13 @@ async def main():
         while not cmd_q.empty():
             txt = cmd_q.get()
             if txt == "HELLO":
-                last_send = last_track = last_art_hash = None
+                last_send = None
+                last_track = None
                 print("[serie] HELLO recu -> renvoi complet de l'etat")
             else:
                 await exec_cmd(mgr, txt)
 
-        # volume (allege)
+        # volume (allege, dans un thread dedie)
         if ENABLE_VOLUME and tick % VOL_EVERY == 1:
             try:
                 v = await asyncio.wait_for(loop.run_in_executor(None, get_volume_sync), timeout=2.0)
@@ -307,19 +326,12 @@ async def main():
 
         # lecture de l'etat Deezer
         state = {"t": "", "a": "", "st": "pause", "vol": vol_cache, "pos": 0, "dur": 0}
-        track_id = None
-        art = None
-        if DEBUG: print(f"[trace] tick={tick} avant pick_session")
         s = pick_session(mgr)
-        if DEBUG: print(f"[trace] tick={tick} pick_session -> {(s.source_app_user_model_id if s else None)!r}")
         if s:
             try:
-                if DEBUG: print(f"[trace] tick={tick} avant get_media_properties")
                 props = await s.try_get_media_properties_async()
-                if DEBUG: print(f"[trace] tick={tick} apres get_media_properties")
                 state["t"] = props.title or ""
                 state["a"] = props.artist or ""
-                if DEBUG: print(f"[trace] tick={tick} avant playback/timeline")
                 info = s.get_playback_info()
                 state["st"] = "play" if info.playback_status == PlaybackStatus.PLAYING else "pause"
                 tl = s.get_timeline_properties()
@@ -328,8 +340,12 @@ async def main():
                 track_id = state["t"] + "|" + state["a"]
                 if track_id != last_track and state["t"]:
                     last_track = track_id
-                    if cover_task is None or cover_task.done():
-                        cover_task = asyncio.create_task(fetch_and_send_cover(loop))
+                    cached = cover_cache.get(track_id)
+                    if cached:
+                        if serial_write(f"ART:{len(cached)}\n".encode()) and serial_write(cached):
+                            print(f"[pochette] (cache) {len(cached)} octets")
+                    else:
+                        asyncio.create_task(fetch_and_send_cover(track_id))
             except Exception as e:
                 if now - last_warn > 10:
                     last_warn = now
@@ -339,21 +355,17 @@ async def main():
                 last_warn = now
                 print("[deezer] aucune session -> ouvre l'appli Deezer et joue un titre")
 
-        if DEBUG:
-            _a = (s.source_app_user_model_id if s else None)
-            print(f"[dbg] tick={tick} session={_a!r} titre={state['t']!r} status={state['st']} vol={state['vol']}")
-
-        # envoi vers le Pico des que l'etat change (pos inclus -> barre de progression)
+        # envoi de l'etat des qu'il change (pos inclus -> barre de progression)
         if state != last_send:
             serial_write(("ST " + json.dumps(state, ensure_ascii=False) + "\n").encode("utf-8"))
             last_send = state
 
-        # affichage console seulement sur changement "utile" (pas chaque seconde)
+        # affichage console sur changement "utile" (pas chaque seconde)
         pkey = (state["t"], state["a"], state["st"], state["vol"])
         if pkey != last_print and state["t"]:
             last_print = pkey
             tag = "PLAY " if state["st"] == "play" else "PAUSE"
-            print(f"[etat] {tag} | {state['t']} - {state['a']} | vol={state['vol']}%")
+            print(f"[etat] {tag}| {state['t']} - {state['a']} | vol={state['vol']}%")
 
         await asyncio.sleep(POLL_S)
 
