@@ -446,6 +446,8 @@ async def main():
 
         # lecture de l'etat Deezer
         state = {"t": "", "a": "", "st": "pause", "vol": vol_cache, "pos": 0, "dur": 0}
+        track_changed = False
+        track_id = None
         s = pick_session(mgr)
         if s:
             try:
@@ -461,12 +463,7 @@ async def main():
                 current_track = track_id
                 if track_id != last_track and state["t"]:
                     last_track = track_id
-                    cached = cover_cache.get(track_id)
-                    if cached:
-                        if serial_write(f"ART:{len(cached)}\n".encode()) and serial_write(cached):
-                            print(f"[pochette] (cache) {len(cached)} octets")
-                    elif cover_task is None or cover_task.done():
-                        cover_task = asyncio.create_task(fetch_and_send_cover())
+                    track_changed = True
             except Exception as e:
                 if now - last_warn > 10:
                     last_warn = now
@@ -480,6 +477,16 @@ async def main():
         if state != last_send:
             serial_write(("ST " + json.dumps(state, ensure_ascii=False) + "\n").encode("utf-8"))
             last_send = state
+
+        # pochette APRES le ST : le firmware doit recevoir le titre avant la pochette,
+        # sinon il efface la pochette (nouveau titre) juste apres l'avoir affichee.
+        if track_changed and track_id:
+            cached = cover_cache.get(track_id)
+            if cached:
+                if serial_write(f"ART:{len(cached)}\n".encode()) and serial_write(cached):
+                    print(f"[pochette] (cache) {len(cached)} octets")
+            elif cover_task is None or cover_task.done():
+                cover_task = asyncio.create_task(fetch_and_send_cover())
 
         # affichage console sur changement "utile" (pas chaque seconde)
         pkey = (state["t"], state["a"], state["st"], state["vol"])

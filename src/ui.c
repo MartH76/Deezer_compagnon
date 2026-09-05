@@ -14,6 +14,32 @@ static void ui_show_placeholder(void);
 static lv_obj_t *ph_cont;
 static lv_obj_t *ph_bar[PH_BARS];
 static void ph_set_h(void *var, int32_t v) { lv_obj_set_height((lv_obj_t *)var, v); }
+static void vol_anim_cb(void *arc, int32_t v) { lv_arc_set_value((lv_obj_t *)arc, v); }
+static bool ph_anim_on = false;
+
+static void ph_anim_start_all(void) {
+    for (int i = 0; i < PH_BARS; i++) {
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, ph_bar[i]);
+        lv_anim_set_exec_cb(&a, ph_set_h);
+        lv_anim_set_values(&a, 8, 40);
+        lv_anim_set_duration(&a, 360 + i * 80);
+        lv_anim_set_playback_duration(&a, 360 + i * 80);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_delay(&a, i * 110);
+        lv_anim_start(&a);
+    }
+    ph_anim_on = true;
+}
+
+static void ph_anim_stop_all(void) {
+    for (int i = 0; i < PH_BARS; i++) {
+        lv_anim_delete(ph_bar[i], ph_set_h);
+        lv_obj_set_height(ph_bar[i], 10);
+    }
+    ph_anim_on = false;
+}
 
 #define ACCENT  0x8B5CF6   /* violet accent */
 
@@ -43,11 +69,16 @@ void ui_init(void) {
     lv_obj_center(canvas);
     lv_canvas_fill_bg(canvas, lv_color_black(), LV_OPA_COVER);
 
-    /* Egaliseur anime (place au-dessus du fond, cache par defaut) */
+    /* Egaliseur anime, superpose EN PERMANENCE (aussi par-dessus les pochettes).
+       Pastille semi-transparente pour rester lisible sur n'importe quelle jaquette. */
     ph_cont = lv_obj_create(scr);
     lv_obj_remove_style_all(ph_cont);
-    lv_obj_set_size(ph_cont, 84, 42);
-    lv_obj_align(ph_cont, LV_ALIGN_CENTER, 0, -18);
+    lv_obj_set_size(ph_cont, 92, 52);
+    lv_obj_align(ph_cont, LV_ALIGN_CENTER, 0, -14);
+    lv_obj_set_style_bg_color(ph_cont, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(ph_cont, LV_OPA_40, 0);
+    lv_obj_set_style_radius(ph_cont, 12, 0);
+    lv_obj_set_style_pad_all(ph_cont, 9, 0);
     lv_obj_set_flex_flow(ph_cont, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(ph_cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(ph_cont, 7, 0);
@@ -61,18 +92,9 @@ void ui_init(void) {
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(b, 3, 0);
         ph_bar[i] = b;
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, b);
-        lv_anim_set_exec_cb(&a, ph_set_h);
-        lv_anim_set_values(&a, 8, 38);
-        lv_anim_set_duration(&a, 360 + i * 80);
-        lv_anim_set_playback_duration(&a, 360 + i * 80);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_delay(&a, i * 110);
-        lv_anim_start(&a);
     }
-    lv_obj_add_flag(ph_cont, LV_OBJ_FLAG_HIDDEN);
+    ph_anim_start_all();
+    lv_obj_add_flag(ph_cont, LV_OBJ_FLAG_HIDDEN);  /* masque tant que PC non connecte */
 
     /* Anneau de volume au bord, gap en bas */
     arc_vol = lv_arc_create(scr);
@@ -146,8 +168,13 @@ void ui_init(void) {
 void ui_set_connected(bool c) {
     if (c == connected) return;
     connected = c;
-    if (c) lv_obj_add_flag(lbl_wait, LV_OBJ_FLAG_HIDDEN);
-    else   lv_obj_remove_flag(lbl_wait, LV_OBJ_FLAG_HIDDEN);
+    if (c) {
+        lv_obj_add_flag(lbl_wait, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(ph_cont, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(lbl_wait, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ph_cont, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void ui_set_track(const char *title, const char *artist) {
@@ -175,11 +202,28 @@ void ui_set_state(const char *st) {
     lv_label_set_text(lbl_state, playing ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
     lv_obj_set_style_text_color(lbl_state,
         playing ? lv_color_hex(ACCENT) : lv_color_hex(0x888888), 0);
+    /* Egaliseur : anime en lecture, fige en pause. */
+    if (playing && !ph_anim_on)      ph_anim_start_all();
+    else if (!playing && ph_anim_on) ph_anim_stop_all();
 }
 
 void ui_set_volume(int vol) {
+    static int vol_target = -1;
     if (vol < 0) vol = 0; if (vol > 100) vol = 100;
-    lv_arc_set_value(arc_vol, vol);
+    if (vol == vol_target) return;      /* deja en route vers cette valeur */
+    vol_target = vol;
+
+    /* Glissement doux depuis la valeur actuelle -> lisse le polling 1 s. */
+    int cur = lv_arc_get_value(arc_vol);
+    lv_anim_delete(arc_vol, vol_anim_cb);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, arc_vol);
+    lv_anim_set_exec_cb(&a, vol_anim_cb);
+    lv_anim_set_values(&a, cur, vol);
+    lv_anim_set_duration(&a, 500);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
 }
 
 void ui_set_progress(int pos, int dur) {
@@ -210,7 +254,6 @@ void ui_set_cover(const uint8_t *jpeg, size_t len) {
     lv_draw_image(&layer, &idsc, &area);
     lv_canvas_finish_layer(canvas, &layer);
 
-    if (ph_cont) lv_obj_add_flag(ph_cont, LV_OBJ_FLAG_HIDDEN);
     lv_obj_invalidate(canvas);
 }
 
@@ -219,7 +262,6 @@ void ui_set_cover(const uint8_t *jpeg, size_t len) {
 static void ui_show_placeholder(void) {
     lv_canvas_fill_bg(canvas, lv_color_hex(0x15131C), LV_OPA_COVER);
     lv_obj_invalidate(canvas);
-    if (ph_cont) lv_obj_remove_flag(ph_cont, LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_bringup_demo(void) {
