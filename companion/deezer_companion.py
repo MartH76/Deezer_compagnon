@@ -26,7 +26,15 @@ import time
 
 import serial
 import serial.tools.list_ports
-from PIL import Image
+from PIL import Image, ImageDraw
+import os
+
+try:
+    import pystray
+    from pystray import MenuItem as Item, Menu
+    HAS_TRAY = True
+except Exception:
+    HAS_TRAY = False
 
 from winsdk.windows.media.control import (
     GlobalSystemMediaTransportControlsSessionManager as MediaManager,
@@ -55,6 +63,10 @@ ENABLE_VOLUME = True
 
 cmd_q = queue.Queue()
 ser = None
+last_port = None
+paused = False        # mis en pause depuis l'icone tray
+force_full = False    # forcer un renvoi complet (reprise / reconnexion)
+_icon = None
 ser_lock = threading.Lock()
 
 
@@ -103,7 +115,7 @@ def serial_reader(s):
 
 
 def try_open_serial():
-    global ser
+    global ser, last_port
     port = find_port()
     if not port:
         return False
@@ -121,12 +133,15 @@ def try_open_serial():
     with ser_lock:
         ser = s
     threading.Thread(target=serial_reader, args=(s,), daemon=True).start()
+    last_port = port
     print(f"[serie] >>> connecte sur {port}")
     return True
 
 
 def serial_write(data):
     global ser
+    if paused:
+        return False
     with ser_lock:
         s = ser
     if s is None:
@@ -362,7 +377,7 @@ def subscribe_manager(mgr):
 
 # ----------------------------------------------------------------- boucle principale
 async def main():
-    global main_loop, wake_event, current_track
+    global main_loop, wake_event, current_track, force_full
     print("======== Deezer companion ========")
     print("Ports serie detectes :")
     print(list_ports_str())
@@ -393,6 +408,11 @@ async def main():
     while True:
         tick += 1
         now = time.time()
+
+        if force_full:            # reprise apres pause / reconnexion
+            force_full = False
+            last_send = None
+            last_track = None
 
         # reconnexion serie
         with ser_lock:
@@ -475,8 +495,89 @@ async def main():
         wake_event.clear()
 
 
-if __name__ == "__main__":
+# ----------------------------------------------------------------- icone tray
+def _make_icon(active):
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    bg = (139, 92, 246, 255) if active else (110, 110, 110, 255)
+    d.ellipse((3, 3, 61, 61), fill=bg)
+    w = (255, 255, 255, 255)
+    d.ellipse((20, 38, 34, 50), fill=w)                       # tete de note
+    d.rectangle((31, 17, 35, 46), fill=w)                     # hampe
+    d.polygon([(35, 17), (47, 21), (47, 30), (35, 26)], fill=w)  # drapeau
+    return img
+
+
+def _status_text(_item=None):
+    with ser_lock:
+        connected = ser is not None
+    if paused:
+        return "Etat : en pause"
+    if connected:
+        return f"Pico : connecte ({last_port})"
+    return "Pico : non connecte"
+
+
+def _track_text(_item=None):
+    return "Deezer : " + (current_track.split("|")[0] if current_track else "-")
+
+
+def _toggle_pause(icon, item):
+    global paused, force_full
+    paused = not paused
+    if not paused:
+        force_full = True     # forcer le renvoi complet a la reprise
+    icon.update_menu()
+
+
+def _quit(icon, item):
+    icon.stop()
+    os._exit(0)
+
+
+def _tray_updater():
+    prev = None
+    while True:
+        with ser_lock:
+            connected = ser is not None
+        active = connected and not paused
+        if active != prev:
+            prev = active
+            try:
+                _icon.icon = _make_icon(active)
+                _icon.title = "Deezer companion - " + ("actif" if active else ("en pause" if paused else "en attente"))
+            except Exception:
+                pass
+        try:
+            _icon.update_menu()
+        except Exception:
+            pass
+        time.sleep(1.5)
+
+
+def _run_asyncio():
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[compagnon] arret.")
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    if HAS_TRAY:
+        menu = Menu(
+            Item("Deezer companion", None, enabled=False),
+            Item(_status_text, None, enabled=False),
+            Item(_track_text, None, enabled=False),
+            Menu.SEPARATOR,
+            Item("En pause", _toggle_pause, checked=lambda i: paused),
+            Item("Quitter", _quit),
+        )
+        _icon = pystray.Icon("deezer_companion", _make_icon(False), "Deezer companion", menu)
+        threading.Thread(target=_run_asyncio, daemon=True).start()
+        threading.Thread(target=_tray_updater, daemon=True).start()
+        _icon.run()          # bloquant sur le thread principal
+    else:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print("\n[compagnon] arret.")

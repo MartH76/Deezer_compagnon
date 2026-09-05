@@ -4,3 +4,4 @@ comtypes
 pyserial
 pillow
 psutil
+pystray
