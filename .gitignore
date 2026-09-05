@@ -1,0 +1,8 @@
+build/
+_to_delete/
+*.uf2
+*.elf
+*.bin
+__pycache__/
+
+.vscode/

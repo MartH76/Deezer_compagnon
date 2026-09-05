@@ -1,0 +1,6 @@
+winsdk
+pycaw
+comtypes
+pyserial
+pillow
+psutil
