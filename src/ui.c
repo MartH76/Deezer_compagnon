@@ -9,7 +9,8 @@ LV_FONT_DECLARE(lv_font_dz_artist_16);
 
 #define ACCENT  0x8B5CF6   /* violet accent */
 
-static lv_obj_t *img_cover;
+static lv_obj_t *canvas;
+static uint8_t   cover_buf[LCD_W * LCD_H * 2];   /* fond RGB565 (pochette pre-decodee) */
 static lv_obj_t *arc_vol;
 static lv_obj_t *scrim;
 static lv_obj_t *lbl_title;
@@ -27,9 +28,12 @@ void ui_init(void) {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Pochette : creee en premier -> reste en arriere-plan */
-    img_cover = lv_image_create(scr);
-    lv_obj_center(img_cover);
+    /* Fond = canvas RGB565 : la pochette y est DECODEE UNE FOIS puis affichee
+       comme bitmap. Evite tout re-decodage JPEG pendant le defilement du titre. */
+    canvas = lv_canvas_create(scr);
+    lv_canvas_set_buffer(canvas, cover_buf, LCD_W, LCD_H, LV_COLOR_FORMAT_RGB565);
+    lv_obj_center(canvas);
+    lv_canvas_fill_bg(canvas, lv_color_black(), LV_OPA_COVER);
 
     /* Anneau de volume au bord, gap en bas */
     arc_vol = lv_arc_create(scr);
@@ -146,10 +150,20 @@ void ui_set_cover(const uint8_t *jpeg, size_t len) {
     cover_dsc.data         = jpeg;
     cover_dsc.data_size    = len;
 
-    /* Purge le cache pour forcer un nouveau decodage sur le meme pointeur. */
+    /* Forcer le decodage du NOUVEau JPEG (meme pointeur dsc reutilise). */
     lv_image_cache_drop(&cover_dsc);
-    lv_image_set_src(img_cover, &cover_dsc);
-    lv_obj_center(img_cover);
+
+    /* Decoder la pochette UNE seule fois dans le buffer RGB565 du canvas. */
+    lv_layer_t layer;
+    lv_canvas_init_layer(canvas, &layer);
+    lv_draw_image_dsc_t idsc;
+    lv_draw_image_dsc_init(&idsc);
+    idsc.src = &cover_dsc;
+    lv_area_t area = { 0, 0, LCD_W - 1, LCD_H - 1 };
+    lv_draw_image(&layer, &idsc, &area);
+    lv_canvas_finish_layer(canvas, &layer);
+
+    lv_obj_invalidate(canvas);
 }
 
 void ui_bringup_demo(void) {

@@ -7,9 +7,12 @@
 /* Deux buffers PLEIN ECRAN (240x240 RGB565 = 115 Ko chacun) -> double buffering.
    Buffer plein => toute zone invalide (pochette comprise) est rendue en UNE passe
    (donc UN seul decodage JPEG) puis envoyee en UN transfert DMA. */
-#define FB_BYTES (LCD_W * LCD_H * 2)
-static uint8_t buf1[FB_BYTES];
-static uint8_t buf2[FB_BYTES];
+/* Buffers partiels (le fond est un canvas RGB565 deja decode : plus besoin de
+   buffers plein ecran). Double buffering + DMA -> rendu fluide. */
+#define BUF_LINES 60
+#define BUF_BYTES (LCD_W * BUF_LINES * 2)
+static uint8_t buf1[BUF_BYTES];
+static uint8_t buf2[BUF_BYTES];
 
 static lv_display_t *g_disp;
 
