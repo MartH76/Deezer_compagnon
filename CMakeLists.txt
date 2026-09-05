@@ -56,6 +56,8 @@ add_executable(Deezer_compagnon
     src/usb_proto.c
     src/ui.c
     src/encoder.c
+    src/lv_font_dz_title_22.c
+    src/lv_font_dz_artist_16.c
 )
 
 pico_set_program_name(Deezer_compagnon "Deezer_compagnon")

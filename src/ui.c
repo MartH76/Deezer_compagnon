@@ -3,6 +3,10 @@
 #include "lvgl.h"
 #include <string.h>
 
+/* Polices Montserrat avec accents (generees, cf. lv_font_dz_*.c) */
+LV_FONT_DECLARE(lv_font_dz_title_22);
+LV_FONT_DECLARE(lv_font_dz_artist_16);
+
 #define ACCENT  0x8B5CF6   /* violet accent */
 
 static lv_obj_t *img_cover;
@@ -61,7 +65,7 @@ void ui_init(void) {
 
     /* Titre defilant */
     lbl_title = lv_label_create(scr);
-    lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_font(lbl_title, &lv_font_dz_title_22, 0);
     lv_obj_set_style_text_color(lbl_title, lv_color_white(), 0);
     lv_label_set_long_mode(lbl_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_width(lbl_title, 190);
@@ -71,7 +75,7 @@ void ui_init(void) {
 
     /* Artiste */
     lbl_artist = lv_label_create(scr);
-    lv_obj_set_style_text_font(lbl_artist, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(lbl_artist, &lv_font_dz_artist_16, 0);
     lv_obj_set_style_text_color(lbl_artist, lv_color_hex(0xBBBBBB), 0);
     lv_label_set_long_mode(lbl_artist, LV_LABEL_LONG_DOT);
     lv_obj_set_width(lbl_artist, 190);

@@ -46,9 +46,11 @@ DEEZER_PROC = "deezer.exe"
 ACCEPTED_VIDS = (0x2E8A, 0x303A)   # 0x2E8A = Raspberry Pi (Pico), 0x303A = Espressif
 BAUD = 921600
 ART_SIZE = 240
+COVER_MAX_BYTES = 12000   # budget JPEG : temps d'envoi ~constant
 POLL_S = 0.2
 VOL_EVERY = 4
 RECONNECT_S = 3.0
+HEARTBEAT_S = 1.0   # reveil periodique (progression + filet de securite)
 ENABLE_VOLUME = True
 
 cmd_q = queue.Queue()
@@ -188,9 +190,17 @@ async def read_thumbnail(props):
     raw = bytes(buf)
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     img = img.resize((ART_SIZE, ART_SIZE), getattr(Image, "Resampling", Image).LANCZOS)
-    out = io.BytesIO()
-    img.save(out, "JPEG", quality=80)
-    return out.getvalue()
+    # Encodage vers un budget d'octets : on baisse la qualite jusqu'a passer sous
+    # COVER_MAX_BYTES (ecran 240 px -> la perte est invisible), pour un temps
+    # d'envoi/decodage quasi constant quelle que soit la pochette.
+    data = None
+    for q in (72, 60, 48, 38, 30, 24):
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=q)
+        data = out.getvalue()
+        if len(data) <= COVER_MAX_BYTES:
+            break
+    return data
 
 
 # ----------------------------------------------------------------- worker pochettes
@@ -229,24 +239,35 @@ async def _worker_read_cover():
     return await read_thumbnail(props)
 
 
-async def fetch_and_send_cover(track_id):
-    """Recupere la pochette via le worker persistant, met en cache et envoie."""
+current_track = None
+
+
+async def fetch_and_send_cover():
+    """Recupere la pochette de la piste courante et l'envoie.
+    Retries : la vignette SMTC arrive souvent un peu apres le titre.
+    Garde-fou : on n'envoie pas si l'utilisateur a change de piste entre-temps."""
     if _cover_loop is None:
         return
-    try:
-        fut = asyncio.run_coroutine_threadsafe(_worker_read_cover(), _cover_loop)
-        art = await asyncio.wait_for(asyncio.wrap_future(fut), timeout=8.0)
-    except Exception as e:
-        print(f"[pochette] echec/timeout: {e}")
-        return
-    if not art:
-        return
-    cover_cache[track_id] = art
-    _cache_order.append(track_id)
-    if len(_cache_order) > 40:
-        cover_cache.pop(_cache_order.pop(0), None)
-    if serial_write(f"ART:{len(art)}\n".encode()) and serial_write(art):
-        print(f"[pochette] envoyee {len(art)} octets")
+    for _ in range(6):
+        target = current_track
+        if not target:
+            return
+        art = None
+        try:
+            fut = asyncio.run_coroutine_threadsafe(_worker_read_cover(), _cover_loop)
+            art = await asyncio.wait_for(asyncio.wrap_future(fut), timeout=6.0)
+        except Exception as e:
+            print(f"[pochette] echec/timeout: {e}")
+        if art and current_track == target:
+            cover_cache[target] = art
+            _cache_order.append(target)
+            if len(_cache_order) > 40:
+                cover_cache.pop(_cache_order.pop(0), None)
+            if serial_write(f"ART:{len(art)}\n".encode()) and serial_write(art):
+                print(f"[pochette] envoyee {len(art)} octets")
+            return
+        await asyncio.sleep(0.3)
+    print("[pochette] pas de vignette (abandon apres retries)")
 
 
 # ----------------------------------------------------------------- commandes
@@ -272,8 +293,60 @@ async def exec_cmd(mgr, txt):
             pass
 
 
+# ----------------------------------------------------------------- evenements SMTC
+main_loop = None
+wake_event = None
+_sub_session = None
+_sub_tokens = []
+_mgr_handlers = []
+
+
+def _wake(*_):
+    """Appele depuis un thread WinRT : reveille la boucle asyncio immediatement."""
+    if main_loop is not None and wake_event is not None:
+        main_loop.call_soon_threadsafe(wake_event.set)
+
+
+def subscribe_events(mgr):
+    """(Re)abonne la session courante : changement de piste + play/pause."""
+    global _sub_session, _sub_tokens
+    try:
+        if _sub_session is not None:
+            for kind, tok in _sub_tokens:
+                if kind == "mp":
+                    _sub_session.remove_media_properties_changed(tok)
+                elif kind == "pi":
+                    _sub_session.remove_playback_info_changed(tok)
+    except Exception:
+        pass
+    _sub_tokens = []
+    sess = pick_session(mgr)
+    _sub_session = sess
+    if sess is not None:
+        try:
+            _sub_tokens.append(("mp", sess.add_media_properties_changed(_wake)))
+            _sub_tokens.append(("pi", sess.add_playback_info_changed(_wake)))
+        except Exception as e:
+            print(f"[event] abonnement session impossible : {e}")
+
+
+def subscribe_manager(mgr):
+    """S'abonne aux changements de session et re-hooke la nouvelle session courante."""
+    def on_sessions_changed(*_):
+        _wake()
+        if main_loop is not None:
+            main_loop.call_soon_threadsafe(lambda: subscribe_events(mgr))
+    _mgr_handlers.append(on_sessions_changed)   # garder une reference (anti-GC)
+    try:
+        mgr.add_current_session_changed(on_sessions_changed)
+        mgr.add_sessions_changed(on_sessions_changed)
+    except Exception as e:
+        print(f"[event] abonnement manager impossible : {e}")
+
+
 # ----------------------------------------------------------------- boucle principale
 async def main():
+    global main_loop, wake_event, current_track
     print("======== Deezer companion ========")
     print("Ports serie detectes :")
     print(list_ports_str())
@@ -285,6 +358,11 @@ async def main():
     print("[deezer] init OK, lecture de l'etat en cours...")
     loop = asyncio.get_running_loop()
     start_cover_worker()
+    main_loop = loop
+    wake_event = asyncio.Event()
+    subscribe_manager(mgr)
+    subscribe_events(mgr)
+    print("[event] abonnements SMTC actifs")
 
     last_send = None
     last_print = None
@@ -293,6 +371,8 @@ async def main():
     tick = 0
     last_reco = 0.0
     last_warn = 0.0
+    last_vol = 0.0
+    cover_task = None
 
     while True:
         tick += 1
@@ -316,7 +396,8 @@ async def main():
                 await exec_cmd(mgr, txt)
 
         # volume (allege, dans un thread dedie)
-        if ENABLE_VOLUME and tick % VOL_EVERY == 1:
+        if ENABLE_VOLUME and (now - last_vol) >= 1.0:
+            last_vol = now
             try:
                 v = await asyncio.wait_for(loop.run_in_executor(None, get_volume_sync), timeout=2.0)
                 if v is not None:
@@ -338,14 +419,15 @@ async def main():
                 state["pos"] = int(tl.position.total_seconds())
                 state["dur"] = int(tl.end_time.total_seconds())
                 track_id = state["t"] + "|" + state["a"]
+                current_track = track_id
                 if track_id != last_track and state["t"]:
                     last_track = track_id
                     cached = cover_cache.get(track_id)
                     if cached:
                         if serial_write(f"ART:{len(cached)}\n".encode()) and serial_write(cached):
                             print(f"[pochette] (cache) {len(cached)} octets")
-                    else:
-                        asyncio.create_task(fetch_and_send_cover(track_id))
+                    elif cover_task is None or cover_task.done():
+                        cover_task = asyncio.create_task(fetch_and_send_cover())
             except Exception as e:
                 if now - last_warn > 10:
                     last_warn = now
@@ -367,7 +449,11 @@ async def main():
             tag = "PLAY " if state["st"] == "play" else "PAUSE"
             print(f"[etat] {tag}| {state['t']} - {state['a']} | vol={state['vol']}%")
 
-        await asyncio.sleep(POLL_S)
+        try:
+            await asyncio.wait_for(wake_event.wait(), timeout=HEARTBEAT_S)
+        except asyncio.TimeoutError:
+            pass
+        wake_event.clear()
 
 
 if __name__ == "__main__":
