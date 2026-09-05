@@ -83,18 +83,23 @@ def find_port():
 
 
 def serial_reader(s):
+    global ser
     while True:
         try:
             if not s.is_open:
                 break
-            line = s.readline()
+            line = s.readline()          # timeout -> b"" (pas d'exception)
         except Exception:
-            break
+            break                        # port perdu (debranchement)
         if not line:
             continue
         txt = line.decode(errors="ignore").strip()
         if txt:
             cmd_q.put(txt)
+    # sortie de boucle => port perdu : declenche la reconnexion cote boucle principale
+    with ser_lock:
+        if ser is s:
+            ser = None
 
 
 def try_open_serial():
@@ -107,6 +112,12 @@ def try_open_serial():
     except Exception as e:
         print(f"[serie] echec ouverture {port} : {e}")
         return False
+    time.sleep(1.0)                 # laisser le CDC du Pico finir son enumeration
+    try:
+        s.reset_input_buffer()
+        s.reset_output_buffer()
+    except Exception:
+        pass
     with ser_lock:
         ser = s
     threading.Thread(target=serial_reader, args=(s,), daemon=True).start()
@@ -120,18 +131,23 @@ def serial_write(data):
         s = ser
     if s is None:
         return False
-    try:
-        s.write(data)
-        return True
-    except Exception as e:
-        print(f"[serie] <<< perdu ({e}), reconnexion...")
-        with ser_lock:
-            try:
-                s.close()
-            except Exception:
-                pass
-            ser = None
-        return False
+    for attempt in range(3):
+        try:
+            s.write(data)
+            return True
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(0.2)
+                continue
+            print(f"[serie] <<< perdu ({e}), reconnexion...")
+            with ser_lock:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+                if ser is s:
+                    ser = None
+            return False
 
 
 # ----------------------------------------------------------------- volume Deezer
@@ -383,7 +399,10 @@ async def main():
             connected = ser is not None
         if not connected and (now - last_reco) >= RECONNECT_S:
             last_reco = now
-            try_open_serial()
+            if try_open_serial():
+                # Pico (re)branche : forcer le renvoi complet de l'etat + pochette
+                last_send = None
+                last_track = None
 
         # commandes venant du Pico
         while not cmd_q.empty():
