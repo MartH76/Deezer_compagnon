@@ -1,7 +1,7 @@
 /*******************************************************************************
  * Size: 16 px
  * Bpp: 4
- * Opts: --font node_modules/@expo-google-fonts/montserrat/500Medium/Montserrat_500Medium.ttf --size 16 --bpp 4 --format lvgl --lv-include lvgl.h --no-compress -o /mnt/user-data/outputs/lv_font_dz_artist_16.c -r 0x20-0x7F -r 0xA0-0x17F -r 0x2013-0x2014 -r 0x2018-0x201D -r 0x2026
+ * Genere avec lv_font_conv (Montserrat : latin de base + Latin-1 + Extended-A + ponctuation typographique).
  ******************************************************************************/
 
 #ifdef LV_LVGL_H_INCLUDE_SIMPLE
