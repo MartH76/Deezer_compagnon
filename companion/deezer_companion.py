@@ -47,7 +47,7 @@ DEEZER_PROC = "deezer.exe"
 ACCEPTED_VIDS = (0x2E8A, 0x303A)   # 0x2E8A = Raspberry Pi (Pico), 0x303A = Espressif
 BAUD = 921600
 ART_SIZE = 240
-POLL_S = 0.25
+POLL_S = 0.2
 VOL_EVERY = 4
 RECONNECT_S = 3.0
 DEBUG = False   # True = traces detaillees
@@ -169,24 +169,26 @@ def pick_session(mgr):
 
 async def read_thumbnail(props):
     ref = props.thumbnail
-    print(f"[pochette-dbg] thumbnail ref = {'oui' if ref else 'NON'}")
+    DEBUG and print(f"[pochette-dbg] thumbnail ref = {'oui' if ref else 'NON'}")
     if ref is None:
         return None
     stream = await ref.open_read_async()
     size = stream.size
-    print(f"[pochette-dbg] taille flux = {size}")
+    DEBUG and print(f"[pochette-dbg] taille flux = {size}")
     if not size:
         return None
     reader = DataReader(stream)
     await reader.load_async(size)
-    raw = bytes(bytearray(reader.read_bytes(size)))
-    print(f"[pochette-dbg] octets bruts = {len(raw)} (magic {raw[:3].hex() if raw else '--'})")
+    buf = bytearray(size)
+    reader.read_bytes(buf)
+    raw = bytes(buf)
+    DEBUG and print(f"[pochette-dbg] octets bruts = {len(raw)} (magic {raw[:3].hex() if raw else '--'})")
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     img = img.resize((ART_SIZE, ART_SIZE), Image.LANCZOS)
     out = io.BytesIO()
     img.save(out, "JPEG", quality=80)
     data = out.getvalue()
-    print(f"[pochette-dbg] jpeg final = {len(data)} octets")
+    DEBUG and print(f"[pochette-dbg] jpeg final = {len(data)} octets")
     return data
 
 
@@ -203,7 +205,7 @@ def fetch_cover_sync():
     try:
         return asyncio.run(_inner())
     except Exception as e:
-        print(f"[pochette-dbg] exception: {e!r}")
+        DEBUG and print(f"[pochette-dbg] exception: {e!r}")
         return None
 
 
@@ -213,6 +215,18 @@ def get_volume_sync():
         return get_deezer_volume()
     except Exception:
         return None
+
+
+async def fetch_and_send_cover(loop):
+    """Recupere la pochette (thread dedie) et l'envoie, SANS bloquer le flux d'etat."""
+    try:
+        art = await asyncio.wait_for(loop.run_in_executor(None, fetch_cover_sync), timeout=8.0)
+    except Exception as e:
+        print(f"[pochette] echec/timeout: {e}")
+        return
+    if art:
+        if serial_write(f"ART:{len(art)}\n".encode()) and serial_write(art):
+            print(f"[pochette] envoyee {len(art)} octets")
 
 
 async def exec_cmd(mgr, txt):
@@ -253,6 +267,7 @@ async def main():
     last_send = None
     last_print = None
     last_track = None
+    cover_task = None
     last_art_hash = None
     vol_cache = 0
     tick = 0
@@ -311,14 +326,10 @@ async def main():
                 state["pos"] = int(tl.position.total_seconds())
                 state["dur"] = int(tl.end_time.total_seconds())
                 track_id = state["t"] + "|" + state["a"]
-                if track_id != last_track:
-                    if DEBUG: print(f"[trace] tick={tick} avant thumbnail")
-                    try:
-                        art = await asyncio.wait_for(loop.run_in_executor(None, fetch_cover_sync), timeout=8.0)
-                    except Exception as e:
-                        print(f"[pochette] echec/timeout: {e}")
-                        art = None
-                    if DEBUG: print(f"[trace] tick={tick} apres thumbnail (art={'oui' if art else 'non'})")
+                if track_id != last_track and state["t"]:
+                    last_track = track_id
+                    if cover_task is None or cover_task.done():
+                        cover_task = asyncio.create_task(fetch_and_send_cover(loop))
             except Exception as e:
                 if now - last_warn > 10:
                     last_warn = now
@@ -343,16 +354,6 @@ async def main():
             last_print = pkey
             tag = "PLAY " if state["st"] == "play" else "PAUSE"
             print(f"[etat] {tag} | {state['t']} - {state['a']} | vol={state['vol']}%")
-
-        # pochette (au changement de piste)
-        if art:
-            h = hashlib.md5(art).hexdigest()
-            if h != last_art_hash:
-                if serial_write(f"ART:{len(art)}\n".encode()) and serial_write(art):
-                    print(f"[pochette] envoyee {len(art)} octets")
-                last_art_hash = h
-        if track_id is not None:
-            last_track = track_id
 
         await asyncio.sleep(POLL_S)
 

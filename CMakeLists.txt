@@ -74,6 +74,7 @@ target_compile_definitions(Deezer_compagnon PRIVATE LV_CONF_INCLUDE_SIMPLE)
 target_link_libraries(Deezer_compagnon
     pico_stdlib
     hardware_spi
+    hardware_dma
     lvgl
 )
 

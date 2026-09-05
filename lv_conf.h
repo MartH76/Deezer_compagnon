@@ -6,10 +6,14 @@
 #define LV_COLOR_DEPTH 16
 
 /* Tas LVGL : doit contenir la pochette decodee (240x240x2 = 115 Ko) + marge */
-#define LV_MEM_SIZE (200 * 1024U)
+#define LV_MEM_SIZE (64 * 1024U)
 
 /* Rendu software en C pur : pas d'assembleur Helium/NEON (incompatible ici) */
 #define LV_USE_DRAW_SW_ASM LV_DRAW_SW_ASM_NONE
+
+/* Memory-FS : requis pour que TJPGD decode un JPEG depuis la RAM (pochette) */
+#define LV_USE_FS_MEMFS 1
+#define LV_FS_MEMFS_LETTER 'M'
 
 /* Decodeur JPEG integre (Tiny JPEG) pour les pochettes recues du PC */
 #define LV_USE_TJPGD 1
