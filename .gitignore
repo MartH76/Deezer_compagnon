@@ -1,8 +1,17 @@
+# Artefacts de build firmware
 build/
-_to_delete/
 *.uf2
 *.elf
 *.bin
-__pycache__/
 
-.vscode/
+# Artefacts de build du compagnon (PyInstaller)
+companion/build/
+companion/dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+
+# Divers
+_to_delete/

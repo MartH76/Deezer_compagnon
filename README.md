@@ -1,102 +1,138 @@
 # Deezer Desk Gadget
 
-Petit ecran rond (GC9A01) pilote par un **Raspberry Pi Pico 2 (RP2350)**, branche
-en USB au PC, qui affiche le titre / artiste / pochette en cours sur Deezer et
-permet de controler la lecture. Un **compagnon Python** tourne sur le PC (Windows)
-et fait le pont entre Deezer (media session SMTC) et le micro (USB CDC).
+Un petit **écran rond (GC9A01, 240×240)** posé à côté du PC qui affiche en temps
+réel ce qui joue sur **Deezer** — pochette, titre, artiste, volume, progression —
+et (à terme, via un encodeur) permet de changer de piste et de régler le volume.
+
+L'écran est piloté par un **microcontrôleur RP2350** relié au PC en **USB**. Un
+petit **compagnon Windows** lit la lecture Deezer (media session du système) et
+l'envoie au micro par liaison série USB.
 
 ```
-[GC9A01 (+encodeur)] --SPI--> [Pico 2] --USB CDC--> [compagnon Python] --> SMTC/pycaw --> Deezer
+[GC9A01 + encodeur] --SPI--> [RP2350] --USB CDC--> [Compagnon Windows] --SMTC/pycaw--> Deezer
+        ▲                                    │                                            │
+        └────── état (titre / artiste / pochette / volume / play-pause) ◀────────────────┘
 ```
 
-## Cible materielle
+## Deux composants
 
-Deux cibles, selectionnees par `TARGET_PAMI` dans `src/config.h` :
+| Composant | Où | Rôle |
+|-----------|----|------|
+| **Firmware** (`src/`, C, Pico SDK + LVGL) | sur le RP2350 | affichage LVGL sur le GC9A01, réception série |
+| **Compagnon** (`companion/`, Python/Windows) | sur le PC | lit Deezer, envoie l'état + la pochette au micro, icône dans la zone de notification |
 
-- **`TARGET_PAMI 1`** (par defaut) : **PAMI de l'equipe** avec un **Pico 2 W** et
-  l'ecran GC9A01 deja cable. Plateforme de dev en attendant le materiel final.
-- **`TARGET_PAMI 0`** : carte finale **RP2350-Zero** (cablage a definir).
+---
 
-> Flasher le firmware Deezer sur le Pico du PAMI **remplace le firmware PAMI**.
-> Pour rendre le robot, reflasher le `.uf2` d'origine de l'equipe.
+## Utilisation (utilisateur final — sans rien compiler)
 
-## Cablage ecran
+À partir d'une *release* GitHub (voir plus bas) :
 
-### PAMI (Pico 2 W) — impose par leur `lib_screen`
-| GC9A01 | GPIO | 
+1. **Flasher le firmware** : brancher le Pico en maintenant **BOOTSEL** → il
+   apparaît comme lecteur USB → y glisser le fichier **`.uf2`**. C'est tout.
+2. **Lancer le compagnon** : double-cliquer **`DeezerCompanion.exe`**.
+   Une icône apparaît dans la zone de notification (clic droit : état, Pause,
+   Quitter).
+3. Ouvrir **Deezer** et lancer une musique. L'écran se remplit.
+4. *(option)* Lancement auto : `Win + R` → `shell:startup` → y déposer un
+   raccourci vers `DeezerCompanion.exe`.
+
+Prérequis côté utilisateur : **Windows**, l'appli **Deezer** (version desktop /
+Store) et le gadget branché en USB. Aucun Python à installer.
+
+---
+
+## Câblage écran (SPI0)
+
+Configurable dans `src/config.h` via le sélecteur `TARGET_PAMI`.
+
+**Cible PAMI / Pico 2 W** (`TARGET_PAMI 1`, défaut) :
+
+| GC9A01 | GPIO |
 |--------|------|
 | SCK    | GP18 |
 | MOSI/SDA | GP19 |
 | DC     | GP20 |
 | CS     | GP21 |
 | RST    | GP22 |
-| BL     | (cable au 3V3, pas de controle) |
+| BL     | 3V3 (pas de contrôle) |
 | VCC / GND | 3V3 / GND |
 
-SPI0, 62.5 MHz. `MADCTL=0x88` (identique au driver PAMI).
+**Carte finale RP2350-Zero** (`TARGET_PAMI 0`) : SCK=GP2, MOSI=GP3, DC=GP6,
+CS=GP5, RST=GP7, BL=GP8. Encodeur (à venir) : A=GP10, B=GP11, SW=GP12
+(`USE_ENCODER 1`).
 
-### Carte finale RP2350-Zero (`TARGET_PAMI 0`)
-SCK=GP2, MOSI=GP3, DC=GP6, CS=GP5, RST=GP7, BL=GP8. Encodeur : A=GP10, B=GP11,
-SW=GP12 (`USE_ENCODER 1`).
+---
 
-## Build du firmware (VS Code)
+## Build depuis les sources (développeur)
 
-1. Extension **Raspberry Pi Pico** (fournit SDK, toolchain ARM, CMake/Ninja).
-2. Ouvrir ce dossier. *Raspberry Pi Pico: Configure CMake*.
-3. Carte : **Pico 2 W** (le CMake force deja `PICO_BOARD=pico2_w`), SDK **2.x**.
-4. Compiler -> `build/deezer_gadget.uf2`.
-   Au 1er build, CMake telecharge LVGL v9.2.2 (internet requis).
-5. Brancher le Pico en **BOOTSEL** et copier le `.uf2`.
+### Firmware (VS Code)
+1. Installer l'extension **Raspberry Pi Pico** (fournit SDK, toolchain, CMake).
+2. Ouvrir **ce dossier** (racine du dépôt). Carte : **Pico 2 W** (déjà fixée dans
+   `CMakeLists.txt`).
+3. *Configure CMake* puis *Compile*. Au 1er build, LVGL v9.2.2 est récupéré
+   automatiquement (connexion internet requise).
+4. Résultat : `build/Deezer_compagnon.uf2` → flasher via BOOTSEL.
 
-### Valider l'ecran sans le PC
-`BRINGUP_TEST 1` dans `config.h`, flasher : mire titre + arc de volume, sans USB.
-Remettre a 0 ensuite.
+Astuce : `BRINGUP_TEST 1` dans `config.h` affiche une mire de test sans PC.
 
-## Compagnon PC (Windows)
-
+### Compagnon (Python)
 ```
 cd companion
-pip install -r requirements.txt
-python deezer_companion.py          # auto-detecte le port du Pico (VID Raspberry Pi)
+python -m pip install -r requirements.txt
+python deezer_companion.py          # port du Pico auto-détecté
 ```
 
-Lit la session Deezer (appli desktop) et pousse titre/artiste/pochette/volume vers
-l'ecran. Lancement au demarrage : tache planifiee ou raccourci .pyw dans Demarrage.
+### Compagnon → exécutable autonome
+```
+cd companion
+build.bat                            # PyInstaller -> dist\DeezerCompanion.exe
+```
+Détails et dépannage : `companion/BUILD.md`.
 
-## Protocole serie
+---
 
-PC -> micro :
-- `ST {"t":..,"a":..,"st":"play|pause","vol":0..100,"pos":s,"dur":s}\n`
-- `ART:<len>\n` suivi de `<len>` octets JPEG (pochette 240x240)
-
-micro -> PC :
-- `CMD:TOGGLE` `CMD:NEXT` `CMD:PREV` `CMD:PLAY` `CMD:PAUSE` `CMD:VOL=NN`
-- `HELLO` au boot (force le renvoi complet de l'etat)
-
-## Arborescence
+## Contenu du dépôt
 
 ```
-.vscode/                # config extension Pico (SDK, toolchain, debug)
-CMakeLists.txt          # projet Pico SDK, LVGL via FetchContent, board pico2_w
-pico_sdk_import.cmake
-lv_conf.h               # config LVGL (RGB565, JPEG, polices)
+CMakeLists.txt, pico_sdk_import.cmake, lv_conf.h   # projet firmware Pico SDK
+.vscode/                                           # config extension Pico (build/debug)
 src/
-  config.h              # TARGET_PAMI + PINOUT + options
-  gc9a01.c/.h           # driver ecran (SPI + init + blit)
-  lvgl_port.c/.h        # display LVGL + tick + flush (swap RGB565)
-  usb_proto.c/.h        # reception USB : ST {json} + pochette ART
-  ui.c/.h               # interface LVGL (pochette, titre, arc volume...)
-  encoder.c/.h          # encodeur (STUB, carte finale)
+  config.h            # TARGET_PAMI + pinout + options
+  gc9a01.{c,h}        # driver écran (SPI + init + DMA)
+  lvgl_port.{c,h}     # display LVGL (double-buffer plein écran, flush DMA)
+  usb_proto.{c,h}     # réception série : ST {json} + pochette ART
+  ui.{c,h}            # interface LVGL (pochette, titre, arc volume, progression)
+  encoder.{c,h}       # encodeur rotatif (stub, à câbler)
+  lv_font_dz_*.c      # polices Montserrat avec accents (générées)
   main.c
 companion/
-  deezer_companion.py   # pont Windows <-> Deezer
+  deezer_companion.py # le compagnon (SMTC + pycaw + série + icône tray)
   requirements.txt
+  start_companion.vbs # lanceur sans fenêtre (mode Python)
+  build.bat, BUILD.md # génération de l'exécutable autonome
+  app.ico
+  smtc_debug.py       # utilitaire de diagnostic SMTC
 ```
 
-## Points a valider sur le vrai materiel
+---
 
-- **Couleurs / orientation** : MADCTL est aligne sur le driver PAMI (`0x88`). Si un
-  souci, ajuster `0x36` ou l'inversion `0x21` dans `gc9a01.c`.
-- **Pochette JPEG** : decodeur TJPGD integre a LVGL (`LV_USE_TJPGD`). Si le titre
-  s'affiche mais pas la pochette, on basculera sur un decodage TJpgDec manuel.
-- **RAM** : `LV_MEM_SIZE` (200 Ko) contient la pochette decodee. Le Pico 2 a 520 Ko.
+## Fonctionnement (résumé technique)
+
+- **Affichage** : LVGL v9, double framebuffer plein écran + envoi DMA vers le
+  GC9A01 → rendu fluide, pochette affichée d'un coup.
+- **Pochette** : lue via SMTC dans un thread WinRT persistant, ré-encodée en JPEG
+  sous un budget (~12 Ko) pour un temps d'envoi constant, décodée par LVGL
+  (`LV_USE_TJPGD` + `LV_USE_FS_MEMFS`). Cache par titre.
+- **Réactivité** : le compagnon est piloté par les événements SMTC
+  (changement de piste / play-pause), avec un *heartbeat* 1 s en filet.
+- **Protocole série** : `ST {json}` (état) et `ART:<len>` + octets JPEG
+  (PC → micro) ; `CMD:*` (micro → PC, pour l'encodeur à venir).
+
+## Limitations connues
+
+- **Compagnon = Windows uniquement** (SMTC + pycaw).
+- **Deezer ne fournit pas sa file d'attente** → impossible de précharger les
+  pochettes suivantes.
+- Le **volume** lu/piloté est celui **par-application de Deezer** dans le
+  mélangeur Windows (indépendant du curseur *interne* de l'appli Deezer).
+- L'exe n'étant pas signé, **SmartScreen** peut avertir au 1er lancement.
